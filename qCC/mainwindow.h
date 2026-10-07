@@ -205,6 +205,8 @@ class MainWindow : public QMainWindow
 	void doActionLoadFile();
 	//! Save the currently selected entities
 	void doActionSaveFile();
+	//! Save the currently selected entities as individual files (one per entity)
+	void doActionSaveIndividualFiles();
 	//! Save all the entities at once, BIN format forced
 	void doActionSaveProject();
 	//! Displays the Global Shift settings dialog

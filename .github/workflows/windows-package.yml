@@ -1,0 +1,123 @@
+name: Windows package
+
+# Builds CloudCompare on Windows and uploads a ready-to-run zip as a workflow artifact
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "feature/**"
+
+jobs:
+  package:
+    name: Windows MSVC package
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install Dependencies
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          architecture: x64
+          auto-activate: false
+          activate-environment: CloudCompareDev
+          environment-file: .ci/conda-win.yml
+          channels: conda-forge
+          conda-remove-defaults: "true"
+
+      - name: Configure MSVC console
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Set environment for MSVC
+        run: |
+          echo "CXX=cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "CC=cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Configure CMake
+        shell: bash -l {0}
+        run: |
+          mkdir build
+
+          export CONDA_LIB_DIR="$CONDA_PREFIX/Library"
+          export EIGEN_ROOT_DIR="$CONDA_LIB_DIR/include/eigen3"
+
+          # remember where the conda DLLs are (for the packaging step)
+          echo "CONDA_DLL_DIRS=$(cygpath -w "$CONDA_LIB_DIR/bin");$(cygpath -w "$CONDA_PREFIX")" >> $GITHUB_ENV
+
+          cmake \
+            -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$CONDA_LIB_DIR" \
+            -DEIGEN_ROOT_DIR="$EIGEN_ROOT_DIR" \
+            -DOPTION_SUPPORT_3DMOUSE_WITH_HIDAPI=ON \
+            -DPLUGIN_GL_QEDL=ON \
+            -DPLUGIN_GL_QSSAO=ON \
+            -DPLUGIN_IO_QADDITIONAL=ON \
+            -DPLUGIN_IO_QCORE=ON \
+            -DPLUGIN_IO_QE57=ON \
+            -DPLUGIN_IO_QPHOTOSCAN=ON \
+            -DPLUGIN_IO_QLAS=ON \
+            -DPLUGIN_IO_QRDB=ON \
+            -DPLUGIN_IO_QRDB_FETCH_DEPENDENCY=ON \
+            -DPLUGIN_IO_QRDB_INSTALL_DEPENDENCY=ON \
+            -DPLUGIN_STANDARD_QANIMATION=ON \
+            -DQANIMATION_WITH_FFMPEG_SUPPORT=ON \
+            -DPLUGIN_STANDARD_QBROOM=ON \
+            -DPLUGIN_STANDARD_QCANUPO=ON \
+            -DPLUGIN_STANDARD_QCOMPASS=ON \
+            -DPLUGIN_STANDARD_QCSF=ON \
+            -DPLUGIN_STANDARD_QFACETS=ON \
+            -DPLUGIN_STANDARD_QHOUGH_NORMALS=ON \
+            -DPLUGIN_STANDARD_QHPR=ON \
+            -DPLUGIN_STANDARD_QM3C2=ON \
+            -DPLUGIN_STANDARD_QPCV=ON \
+            -DPLUGIN_STANDARD_QSRA=ON \
+            -DPLUGIN_STANDARD_QRANSAC_SD=ON \
+            -DPLUGIN_STANDARD_QCLOUDLAYERS=ON \
+            -DPLUGIN_STANDARD_QVOXFALL=ON \
+            .
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Install
+        run: cmake --install build --prefix install
+
+      - name: Copy the required conda DLLs
+        run: |
+          # recursively copies the DLLs that the executable and plugins depend on
+          $dest       = "install\CloudCompare"
+          $searchDirs = $env:CONDA_DLL_DIRS -split ';'
+          $present    = @{}
+          Get-ChildItem $dest -Recurse -Filter *.dll | ForEach-Object { $present[$_.Name.ToLower()] = $true }
+          $queue = New-Object System.Collections.Queue
+          Get-ChildItem $dest -Recurse -Include *.exe,*.dll | ForEach-Object { $queue.Enqueue($_.FullName) }
+          while ($queue.Count -gt 0) {
+            $file = $queue.Dequeue()
+            $deps = dumpbin /nologo /dependents $file | Where-Object { $_ -match '^\s+\S+\.dll\s*$' } | ForEach-Object { $_.Trim() }
+            foreach ($dep in $deps) {
+              $key = $dep.ToLower()
+              if ($present.ContainsKey($key)) { continue }
+              foreach ($dir in $searchDirs) {
+                $candidate = Join-Path $dir $dep
+                if (Test-Path $candidate) {
+                  Copy-Item $candidate $dest
+                  $present[$key] = $true
+                  $queue.Enqueue((Join-Path $dest $dep))
+                  Write-Host "Copied $dep"
+                  break
+                }
+              }
+            }
+          }
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: CloudCompare-windows
+          path: install/CloudCompare
+          retention-days: 14
